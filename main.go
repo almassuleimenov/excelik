@@ -46,7 +46,7 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ограничиваем объем буфера для мультипарт-формы (32 МБ в памяти, остальное во временные файлы)
+	// Ограничиваем объем буфера для мультипарт-формы (32 МБ в памяти)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		http.Error(w, "Ошибка парсинга формы: "+err.Error(), http.StatusBadRequest)
 		return
@@ -57,29 +57,31 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 		idColumn = "ID"
 	}
 
-	file1Header, err := r.FormFile("file1")
+	// ИСПРАВЛЕНО: Извлекаем дескриптор файла (1-й параметр), игнорируем Header (2-й параметр)
+	file1, _, err := r.FormFile("file1")
 	if err != nil {
 		http.Error(w, "Файл file1 обязателен", http.StatusBadRequest)
 		return
 	}
-	defer file1Header.Close()
+	defer file1.Close()
 
-	file2Header, err := r.FormFile("file2")
+	// ИСПРАВЛЕНО: Извлекаем дескриптор файла для второго источника
+	file2, _, err := r.FormFile("file2")
 	if err != nil {
 		http.Error(w, "Файл file2 обязателен", http.StatusBadRequest)
 		return
 	}
-	defer file2Header.Close()
+	defer file2.Close()
 
-	// Инициализируем excelize-читатели напрямую из потоков данных
-	f1, err := excelize.OpenReader(file1Header)
+	// Инициализируем excelize-читатели напрямую из интерфейса multipart.File
+	f1, err := excelize.OpenReader(file1)
 	if err != nil {
 		http.Error(w, "Ошибка чтения Файла 1: "+err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
 	defer f1.Close()
 
-	f2, err := excelize.OpenReader(file2Header)
+	f2, err := excelize.OpenReader(file2)
 	if err != nil {
 		http.Error(w, "Ошибка чтения Файла 2: "+err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -112,7 +114,7 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 
 	_, _ = out.NewSheet(sheetName1)
 	_, _ = out.NewSheet(sheetName2)
-	_ = out.DeleteSheet("Sheet1") // Удаляем дефолтный лист
+	_ = out.DeleteSheet("Sheet1") 
 
 	// ШАГ 3: Выявление расхождений и запись
 	if err := writeDiscrepancies(f1, sheet1, idColumn, setB, out, sheetName1); err != nil {
@@ -196,7 +198,6 @@ func writeDiscrepancies(fIn *excelize.File, sheetIn string, idColumn string, tar
 		}
 
 		if isFirstRow {
-			// Находим индекс и записываем шапку таблицы
 			for i, col := range cols {
 				if strings.TrimSpace(strings.ToLower(col)) == strings.TrimSpace(strings.ToLower(idColumn)) {
 					idIdx = i
@@ -215,7 +216,6 @@ func writeDiscrepancies(fIn *excelize.File, sheetIn string, idColumn string, tar
 			val := strings.TrimSpace(cols[idIdx])
 			_, exists := targetSet[val]
 			
-			// Если идентификатора нет в противоположном файле — это расхождение
 			if !exists {
 				if err := writeRow(fOut, sheetOut, outRowIdx, cols); err != nil {
 					return err
