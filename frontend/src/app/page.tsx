@@ -1,5 +1,5 @@
 'use client';
-
+//D:\Project\backend_projects\excelik\frontend\src\app\page.tsx
 import React, { useState } from 'react';
 
 export default function ExcelComparePage() {
@@ -62,7 +62,7 @@ export default function ExcelComparePage() {
           Excel Comparator
         </h1>
         <p className="text-sm text-neutral-400 text-center mb-8 font-light">
-          Двусторонний поиск расхождений (Симметрическая разность)
+          Двусторонняя сверка данных (Результат разнесен по отдельным листам)
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-6">
