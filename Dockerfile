@@ -9,7 +9,7 @@ RUN apk add --no-cache git ca-certificates && update-ca-certificates
 WORKDIR /build
 
 # Сначала копируем файлы зависимостей для эффективного кэширования слоев Docker
-COPY go.mod go.sum ./
+COPY go.mod go.sum* ./
 RUN go mod download
 
 # Копируем исходный код приложения
