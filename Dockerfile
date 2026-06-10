@@ -1,7 +1,7 @@
 # ==========================================
 # STAGE 1: Сборка статического бинарника Go
 # ==========================================
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 # Устанавливаем необходимые системные инструменты для сборки (если потребуются)
 RUN apk add --no-cache git ca-certificates && update-ca-certificates
