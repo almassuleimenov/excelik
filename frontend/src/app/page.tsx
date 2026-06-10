@@ -26,7 +26,7 @@ export default function ExcelComparePage() {
 
     try {
       // Замени URL на тот, который выдаст Render после деплоя бэкенда
-      const backendUrl = 'https://ЗАМЕНИ_НА_URL_ТВОЕГО_БЭКЕНДА_НА_RENDER.onrender.com/api/v1/compare';
+      const backendUrl = 'https://excelik.onrender.com/api/v1/compare';
       
       const response = await fetch(backendUrl, {
         method: 'POST',
