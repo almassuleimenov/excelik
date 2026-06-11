@@ -25,9 +25,9 @@ func main() {
 	}
 }
 
-// corsMiddleware обрабатывает CORS-запросы для интеграции с фронтендом (Vercel)
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Для продакшена лучше заменить "*" на "https://tvoy-domen.vercel.app"
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
@@ -46,7 +46,6 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ограничиваем объем буфера для мультипарт-формы (32 МБ в памяти)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		http.Error(w, "Ошибка парсинга формы: "+err.Error(), http.StatusBadRequest)
 		return
@@ -57,7 +56,6 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 		idColumn = "ID"
 	}
 
-	// ИСПРАВЛЕНО: Извлекаем дескриптор файла (1-й параметр), игнорируем Header (2-й параметр)
 	file1, _, err := r.FormFile("file1")
 	if err != nil {
 		http.Error(w, "Файл file1 обязателен", http.StatusBadRequest)
@@ -65,7 +63,6 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file1.Close()
 
-	// ИСПРАВЛЕНО: Извлекаем дескриптор файла для второго источника
 	file2, _, err := r.FormFile("file2")
 	if err != nil {
 		http.Error(w, "Файл file2 обязателен", http.StatusBadRequest)
@@ -73,7 +70,6 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file2.Close()
 
-	// Инициализируем excelize-читатели напрямую из интерфейса multipart.File
 	f1, err := excelize.OpenReader(file1)
 	if err != nil {
 		http.Error(w, "Ошибка чтения Файла 1: "+err.Error(), http.StatusUnprocessableEntity)
@@ -88,24 +84,20 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f2.Close()
 
-	sheet1 := f1.GetSheetName(0)
-	sheet2 := f2.GetSheetName(0)
-
-	// ШАГ 1: Сбор ID из Файла 1
-	setA, err := buildIDSet(f1, sheet1, idColumn)
+	// ШАГ 1: Сбор ID из Файла 1 (со всех листов)
+	setA, err := buildIDSet(f1, idColumn)
 	if err != nil {
 		http.Error(w, "Ошибка индексации Файла 1: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// ШАГ 2: Сбор ID из Файла 2
-	setB, err := buildIDSet(f2, sheet2, idColumn)
+	// ШАГ 2: Сбор ID из Файла 2 (со всех листов)
+	setB, err := buildIDSet(f2, idColumn)
 	if err != nil {
 		http.Error(w, "Ошибка индексации Файла 2: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Создаем результирующий файл
 	out := excelize.NewFile()
 	defer out.Close()
 
@@ -114,20 +106,19 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 
 	_, _ = out.NewSheet(sheetName1)
 	_, _ = out.NewSheet(sheetName2)
-	_ = out.DeleteSheet("Sheet1") 
+	_ = out.DeleteSheet("Sheet1")
 
-	// ШАГ 3: Выявление расхождений и запись
-	if err := writeDiscrepancies(f1, sheet1, idColumn, setB, out, sheetName1); err != nil {
-		http.Error(w, "Ошибка генерации расхождений для Файла 1: "+err.Error(), http.StatusInternalServerError)
+	// ШАГ 3: Потоковая запись расхождений
+	if err := writeDiscrepancies(f1, idColumn, setB, out, sheetName1); err != nil {
+		http.Error(w, "Ошибка генерации расхождений Файла 1: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	if err := writeDiscrepancies(f2, sheet2, idColumn, setA, out, sheetName2); err != nil {
-		http.Error(w, "Ошибка генерации расхождений для Файла 2: "+err.Error(), http.StatusInternalServerError)
+	if err := writeDiscrepancies(f2, idColumn, setA, out, sheetName2); err != nil {
+		http.Error(w, "Ошибка генерации расхождений Файла 2: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Стриминг готового файла клиенту
 	filename := fmt.Sprintf("report_%d.xlsx", time.Now().Unix())
 	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
 	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -137,106 +128,116 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// buildIDSet сканирует файл потоком и собирает уникальные ID
-func buildIDSet(f *excelize.File, sheet string, idColumn string) (map[string]struct{}, error) {
+// buildIDSet итерируется по всем листам книги и собирает уникальные ID
+func buildIDSet(f *excelize.File, idColumn string) (map[string]struct{}, error) {
 	set := make(map[string]struct{})
-	rows, err := f.Rows(sheet)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 
-	idIdx := -1
-	isFirstRow := true
-
-	for rows.Next() {
-		cols, err := rows.Columns()
+	for _, sheet := range f.GetSheetList() {
+		rows, err := f.Rows(sheet)
 		if err != nil {
-			return nil, err
+			continue // Пропускаем проблемные или пустые листы
 		}
 
-		if isFirstRow {
-			for i, col := range cols {
-				if strings.TrimSpace(strings.ToLower(col)) == strings.TrimSpace(strings.ToLower(idColumn)) {
-					idIdx = i
-					break
+		idIdx := -1
+		isFirstRow := true
+
+		for rows.Next() {
+			cols, err := rows.Columns()
+			if err != nil {
+				break
+			}
+
+			if isFirstRow {
+				for i, col := range cols {
+					if strings.TrimSpace(strings.ToLower(col)) == strings.TrimSpace(strings.ToLower(idColumn)) {
+						idIdx = i
+						break
+					}
+				}
+				isFirstRow = false
+				continue
+			}
+
+			if idIdx != -1 && idIdx < len(cols) {
+				val := strings.TrimSpace(cols[idIdx])
+				if val != "" {
+					set[val] = struct{}{}
 				}
 			}
-			if idIdx == -1 {
-				return nil, fmt.Errorf("колонка '%s' не найдена", idColumn)
-			}
-			isFirstRow = false
-			continue
 		}
-
-		if idIdx < len(cols) {
-			val := strings.TrimSpace(cols[idIdx])
-			if val != "" {
-				set[val] = struct{}{}
-			}
-		}
+		rows.Close()
 	}
 	return set, nil
 }
 
-// writeDiscrepancies находит строки, ID которых нет в целевой мапе, и записывает их на нужный лист
-func writeDiscrepancies(fIn *excelize.File, sheetIn string, idColumn string, targetSet map[string]struct{}, fOut *excelize.File, sheetOut string) error {
-	rows, err := fIn.Rows(sheetIn)
+// writeDiscrepancies использует StreamWriter для записи без нагрузки на RAM
+func writeDiscrepancies(fIn *excelize.File, idColumn string, targetSet map[string]struct{}, fOut *excelize.File, sheetOut string) error {
+	sw, err := fOut.NewStreamWriter(sheetOut)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
-	idIdx := -1
-	isFirstRow := true
 	outRowIdx := 1
+	headerWritten := false
 
-	for rows.Next() {
-		cols, err := rows.Columns()
+	for _, sheetIn := range fIn.GetSheetList() {
+		rows, err := fIn.Rows(sheetIn)
 		if err != nil {
-			return err
-		}
-
-		if isFirstRow {
-			for i, col := range cols {
-				if strings.TrimSpace(strings.ToLower(col)) == strings.TrimSpace(strings.ToLower(idColumn)) {
-					idIdx = i
-					break
-				}
-			}
-			if err := writeRow(fOut, sheetOut, outRowIdx, cols); err != nil {
-				return err
-			}
-			outRowIdx++
-			isFirstRow = false
 			continue
 		}
 
-		if idIdx < len(cols) {
-			val := strings.TrimSpace(cols[idIdx])
-			_, exists := targetSet[val]
-			
-			if !exists {
-				if err := writeRow(fOut, sheetOut, outRowIdx, cols); err != nil {
-					return err
+		idIdx := -1
+		isFirstRow := true
+
+		for rows.Next() {
+			cols, err := rows.Columns()
+			if err != nil {
+				break
+			}
+
+			if isFirstRow {
+				// Ищем колонку ID на текущем листе
+				for i, col := range cols {
+					if strings.TrimSpace(strings.ToLower(col)) == strings.TrimSpace(strings.ToLower(idColumn)) {
+						idIdx = i
+						break
+					}
 				}
-				outRowIdx++
+
+				// Записываем шапку только один раз для результирующего файла
+				if !headerWritten {
+					rowVals := make([]interface{}, len(cols))
+					for i, v := range cols {
+						rowVals[i] = v
+					}
+					cell, _ := excelize.CoordinatesToCellName(1, outRowIdx)
+					if err := sw.SetRow(cell, rowVals); err == nil {
+						outRowIdx++
+						headerWritten = true
+					}
+				}
+				isFirstRow = false
+				continue
+			}
+
+			if idIdx != -1 && idIdx < len(cols) {
+				val := strings.TrimSpace(cols[idIdx])
+				_, exists := targetSet[val]
+
+				if !exists {
+					rowVals := make([]interface{}, len(cols))
+					for i, v := range cols {
+						rowVals[i] = v
+					}
+					cell, _ := excelize.CoordinatesToCellName(1, outRowIdx)
+					_ = sw.SetRow(cell, rowVals)
+					outRowIdx++
+				}
 			}
 		}
+		rows.Close()
 	}
-	return nil
-}
 
-// writeRow вспомогательная функция для безопасной записи строки по ячейкам
-func writeRow(f *excelize.File, sheet string, rowIdx int, values []string) error {
-	for colIdx, val := range values {
-		cell, err := excelize.CoordinatesToCellName(colIdx+1, rowIdx)
-		if err != nil {
-			return err
-		}
-		if err := f.SetCellValue(sheet, cell, val); err != nil {
-			return err
-		}
-	}
-	return nil
+	// Обязательно сбрасываем буфер на диск
+	return sw.Flush()
 }
