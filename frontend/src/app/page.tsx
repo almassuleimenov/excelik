@@ -22,7 +22,7 @@ export default function ExcelComparePage() {
 
   // Хук для управления таймером ожидания
   useEffect(() => {
-    let interval: NodeJS.Timeout;
+    let interval: ReturnType<typeof setInterval>;
     if (loading) {
       interval = setInterval(() => {
         setElapsedTime((prevTime) => prevTime + 1);
