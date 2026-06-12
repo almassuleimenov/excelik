@@ -2,7 +2,6 @@
 // D:\Project\backend_projects\excelik\frontend\src\app\page.tsx
 import React, { useState, useEffect } from 'react';
 
-// Вспомогательная функция для читабельного размера файлов
 const formatFileSize = (bytes: number): string => {
   if (bytes === 0) return '0 Bytes';
   const k = 1024;
@@ -11,27 +10,32 @@ const formatFileSize = (bytes: number): string => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
-export default function ExcelComparePage() {
+export default function ExcelAppPage() {
+  const [mode, setMode] = useState<'compare' | 'enrich'>('compare');
+
+  // Общие стейты
   const [file1, setFile1] = useState<File | null>(null);
   const [file2, setFile2] = useState<File | null>(null);
-  const [idColumn, setIdColumn] = useState<string>('ID');
-  
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [elapsedTime, setElapsedTime] = useState<number>(0);
 
-  // Хук для управления таймером ожидания
+  // Стейты для Сверки
+  const [idColumn, setIdColumn] = useState<string>('ID');
+
+  // Стейты для Обогащения (ВПР)
+  const [matchColumns, setMatchColumns] = useState<string>('ФИО, ИИН, Период услуги, Услуга, Сумма');
+  const [targetColumn, setTargetColumn] = useState<string>('ID услуги');
+
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
     if (loading) {
       interval = setInterval(() => {
-        setElapsedTime((prevTime) => prevTime + 1);
+        setElapsedTime((prev) => prev + 1);
       }, 1000);
     } else {
-      setElapsedTime(0); // Сброс таймера при завершении загрузки
+      setElapsedTime(0);
     }
-    
-    // Очистка интервала для предотвращения утечек памяти
     return () => clearInterval(interval);
   }, [loading]);
 
@@ -39,21 +43,15 @@ export default function ExcelComparePage() {
     e: React.ChangeEvent<HTMLInputElement>,
     setFile: React.Dispatch<React.SetStateAction<File | null>>
   ) => {
-    const selectedFile = e.target.files?.[0] || null;
-    setFile(selectedFile);
+    setFile(e.target.files?.[0] || null);
     setError(null);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (!file1 || !file2) {
-      setError('Пожалуйста, загрузите оба файла для начала сверки.');
-      return;
-    }
 
-    if (!idColumn.trim()) {
-      setError('Имя колонки идентификатора не может быть пустым.');
+    if (!file1 || !file2) {
+      setError('Пожалуйста, загрузите оба файла.');
       return;
     }
 
@@ -64,14 +62,25 @@ export default function ExcelComparePage() {
     const formData = new FormData();
     formData.append('file1', file1);
     formData.append('file2', file2);
-    formData.append('id_column', idColumn.trim());
+
+    if (mode === 'compare') {
+      if (!idColumn.trim()) return setError('Имя колонки идентификатора не может быть пустым.');
+      formData.append('id_column', idColumn.trim());
+    } else {
+      if (!matchColumns.trim() || !targetColumn.trim()) {
+        setError('Поля колонок для сверки и целевой колонки обязательны.');
+        setLoading(false);
+        return;
+      }
+      formData.append('match_columns', matchColumns.trim());
+      formData.append('target_column', targetColumn.trim());
+    }
 
     try {
-      const backendUrl = process.env.NEXT_PUBLIC_API_URL 
-        ? `${process.env.NEXT_PUBLIC_API_URL}/api/v1/compare`
-        : 'http://localhost:8080/api/v1/compare';
-
-      const response = await fetch(backendUrl, {
+      const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+      const endpoint = mode === 'compare' ? '/api/v1/compare' : '/api/v1/enrich';
+      
+      const response = await fetch(`${baseUrl}${endpoint}`, {
         method: 'POST',
         body: formData,
       });
@@ -88,46 +97,36 @@ export default function ExcelComparePage() {
       }
 
       const blob = await response.blob();
-      
-      if (blob.size === 0) {
-        throw new Error('Сервер вернул пустой файл.');
-      }
+      if (blob.size === 0) throw new Error('Сервер вернул пустой файл.');
 
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `report_сверка_${new Date().toISOString().slice(0, 10)}.xlsx`;
+      a.download = mode === 'compare' 
+        ? `Отчет_сверка_${new Date().toISOString().slice(0, 10)}.xlsx`
+        : `Отчет_обогащение_${new Date().toISOString().slice(0, 10)}.xlsx`;
+      
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
-      
+
     } catch (err: unknown) {
       if (err instanceof TypeError && err.message === 'Failed to fetch') {
-        setError('Не удалось связаться с сервером. Проверьте подключение или CORS настройки.');
+        setError('Не удалось связаться с сервером. Проверьте CORS или запуск бэкенда.');
       } else if (err instanceof Error) {
         setError(err.message);
       } else {
-        setError('Произошла неизвестная системная ошибка.');
+        setError('Неизвестная системная ошибка.');
       }
     } finally {
       setLoading(false);
     }
   };
 
-  const FileUploadZone = ({ 
-    label, 
-    file, 
-    setFile 
-  }: { 
-    label: string; 
-    file: File | null; 
-    setFile: React.Dispatch<React.SetStateAction<File | null>> 
-  }) => (
+  const FileUploadZone = ({ label, file, setFile }: any) => (
     <div className="flex flex-col gap-2">
-      <span className="text-xs uppercase tracking-wider text-neutral-400 font-medium">
-        {label}
-      </span>
+      <span className="text-xs uppercase tracking-wider text-neutral-400 font-medium">{label}</span>
       {!file ? (
         <label className="flex justify-center w-full h-24 px-4 transition border-2 border-neutral-800 border-dashed rounded-lg appearance-none cursor-pointer hover:border-neutral-600 hover:bg-neutral-900/50 focus:outline-none">
           <span className="flex items-center space-x-2 text-neutral-400">
@@ -136,13 +135,7 @@ export default function ExcelComparePage() {
             </svg>
             <span className="text-sm font-light">Нажмите для выбора файла</span>
           </span>
-          <input 
-            type="file" 
-            name="file_upload" 
-            className="hidden" 
-            accept=".xlsx, .xls"
-            onChange={(e) => handleFileChange(e, setFile)}
-          />
+          <input type="file" className="hidden" accept=".xlsx, .xls" onChange={(e) => handleFileChange(e, setFile)} />
         </label>
       ) : (
         <div className="flex items-center justify-between p-4 border border-neutral-700 bg-neutral-800/30 rounded-lg">
@@ -155,12 +148,7 @@ export default function ExcelComparePage() {
               <span className="text-xs text-neutral-500">{formatFileSize(file.size)}</span>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => setFile(null)}
-            className="p-2 text-neutral-500 hover:text-red-400 transition-colors focus:outline-none"
-            title="Удалить файл"
-          >
+          <button type="button" onClick={() => setFile(null)} className="p-2 text-neutral-500 hover:text-red-400 transition-colors">
             <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
             </svg>
@@ -174,41 +162,59 @@ export default function ExcelComparePage() {
     <main className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col justify-center items-center p-6 antialiased selection:bg-emerald-500/30">
       <div className="w-full max-w-xl bg-neutral-900 border border-neutral-800 rounded-2xl p-8 shadow-2xl">
         
-        <div className="mb-8 text-center">
-          <h1 className="text-3xl font-light tracking-tight text-neutral-50 mb-2">
-            Excel Comparator
-          </h1>
-          <p className="text-sm text-neutral-400 font-light">
-            Надежная сверка данных. Различия будут выгружены на отдельные листы.
-          </p>
+        {/* Навигация (Табы) */}
+        <div className="flex space-x-1 bg-neutral-950/50 p-1 rounded-lg mb-8 border border-neutral-800">
+          <button
+            onClick={() => { setMode('compare'); setError(null); }}
+            className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${mode === 'compare' ? 'bg-neutral-800 text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-300'}`}
+          >
+            Сверка (Потеряшки)
+          </button>
+          <button
+            onClick={() => { setMode('enrich'); setError(null); }}
+            className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${mode === 'enrich' ? 'bg-neutral-800 text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-300'}`}
+          >
+            Обогащение (ВПР ID)
+          </button>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">
           
-          <div className="bg-neutral-950/50 p-5 rounded-xl border border-neutral-800/80">
-            <label className="block text-xs uppercase tracking-wider text-neutral-400 font-medium mb-3">
-              Ключ синхронизации (ID)
-            </label>
-            <input
-              type="text"
-              value={idColumn}
-              onChange={(e) => setIdColumn(e.target.value)}
-              placeholder="Например: ИИН, БИН или ID"
-              className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-4 py-3 text-sm text-neutral-200 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 transition-all placeholder:text-neutral-600"
-              required
-            />
-          </div>
+          {mode === 'compare' ? (
+            <div className="bg-neutral-950/50 p-5 rounded-xl border border-neutral-800/80">
+              <label className="block text-xs uppercase tracking-wider text-neutral-400 font-medium mb-3">Ключ синхронизации (ID)</label>
+              <input
+                type="text" value={idColumn} onChange={(e) => setIdColumn(e.target.value)}
+                className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-4 py-3 text-sm text-neutral-200 focus:outline-none focus:border-emerald-500/50 transition-all" required
+              />
+            </div>
+          ) : (
+            <div className="bg-neutral-950/50 p-5 rounded-xl border border-neutral-800/80 space-y-4">
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">Колонки для поиска совпадений (через запятую)</label>
+                <input
+                  type="text" value={matchColumns} onChange={(e) => setMatchColumns(e.target.value)}
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-4 py-3 text-sm text-neutral-200 focus:outline-none focus:border-emerald-500/50 transition-all" required
+                />
+              </div>
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">Название искомой колонки (которую нужно вставить)</label>
+                <input
+                  type="text" value={targetColumn} onChange={(e) => setTargetColumn(e.target.value)}
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-4 py-3 text-sm text-neutral-200 focus:outline-none focus:border-emerald-500/50 transition-all" required
+                />
+              </div>
+            </div>
+          )}
 
           <div className="space-y-5">
             <FileUploadZone 
-              label="Файл 1 (Основной источник)" 
-              file={file1} 
-              setFile={setFile1} 
+              label={mode === 'compare' ? "Файл 1 (Основной источник)" : "Файл 1 (Тапсырма / Куда вставлять ID)"} 
+              file={file1} setFile={setFile1} 
             />
             <FileUploadZone 
-              label="Файл 2 (Таблица для сверки)" 
-              file={file2} 
-              setFile={setFile2} 
+              label={mode === 'compare' ? "Файл 2 (Таблица для сверки)" : "Файл 2 (База данных / Откуда брать ID)"} 
+              file={file2} setFile={setFile2} 
             />
           </div>
 
@@ -222,9 +228,8 @@ export default function ExcelComparePage() {
           )}
 
           <button
-            type="submit"
-            disabled={loading || !file1 || !file2}
-            className="group relative w-full flex justify-center items-center bg-neutral-100 text-neutral-950 rounded-xl py-3.5 text-sm font-semibold hover:bg-white transition-all disabled:bg-neutral-800 disabled:text-neutral-500 disabled:shadow-none cursor-pointer disabled:cursor-not-allowed shadow-[0_0_20px_rgba(255,255,255,0.1)] hover:shadow-[0_0_25px_rgba(255,255,255,0.2)] active:scale-[0.98]"
+            type="submit" disabled={loading || !file1 || !file2}
+            className="group relative w-full flex justify-center items-center bg-neutral-100 text-neutral-950 rounded-xl py-3.5 text-sm font-semibold hover:bg-white transition-all disabled:bg-neutral-800 disabled:text-neutral-500 cursor-pointer disabled:cursor-not-allowed"
           >
             {loading ? (
               <div className="flex items-center space-x-2">
@@ -235,11 +240,10 @@ export default function ExcelComparePage() {
                 <span>Формирование отчета... ({elapsedTime} сек)</span>
               </div>
             ) : (
-              'Сравнить и скачать отчет'
+              mode === 'compare' ? 'Сравнить и скачать отчет' : 'Найти ID и скачать файл'
             )}
           </button>
         </form>
-        
       </div>
     </main>
   );
