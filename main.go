@@ -5,11 +5,15 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/xuri/excelize/v2"
 )
+
+// Регулярное выражение для удаления лишних пробелов внутри текста (например, двойных пробелов в ФИО)
+var multipleSpacesRegex = regexp.MustCompile(`\s+`)
 
 func main() {
 	port := os.Getenv("PORT")
@@ -18,6 +22,7 @@ func main() {
 	}
 
 	http.HandleFunc("/api/v1/compare", corsMiddleware(compareHandler))
+	http.HandleFunc("/api/v1/enrich", corsMiddleware(enrichHandler))
 
 	log.Printf("Сервер запущен на порту %s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
@@ -27,7 +32,6 @@ func main() {
 
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Для продакшена лучше заменить "*" на "https://tvoy-domen.vercel.app"
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
@@ -40,6 +44,26 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// sanitizeKey очищает строку от лишних пробелов по краям и внутри, а также приводит к нижнему регистру
+func sanitizeKey(val string) string {
+	val = strings.TrimSpace(val)
+	val = strings.ToLower(val)
+	val = multipleSpacesRegex.ReplaceAllString(val, " ")
+	return val
+}
+
+// safeOpenExcel безопасно открывает Excel файл с лимитом на размер распакованного XML
+func safeOpenExcel(fileData *os.File) (*excelize.File, error) {
+	// Ограничиваем размер потребляемой памяти при распаковке тяжелых файлов
+	opts := excelize.Options{
+		UnzipXMLSizeLimit: 1024 * 1024 * 500, // 500 MB лимит
+	}
+	return excelize.OpenReader(fileData, opts)
+}
+
+// ==========================================
+// ФУНКЦИОНАЛ 1: СВЕРКА ТАБЛИЦ (COMPARE)
+// ==========================================
 func compareHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
@@ -70,28 +94,26 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file2.Close()
 
-	f1, err := excelize.OpenReader(file1)
+	f1, err := safeOpenExcel(file1.(*os.File))
 	if err != nil {
 		http.Error(w, "Ошибка чтения Файла 1: "+err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
 	defer f1.Close()
 
-	f2, err := excelize.OpenReader(file2)
+	f2, err := safeOpenExcel(file2.(*os.File))
 	if err != nil {
 		http.Error(w, "Ошибка чтения Файла 2: "+err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
 	defer f2.Close()
 
-	// ШАГ 1: Сбор ID из Файла 1 (со всех листов)
 	setA, err := buildIDSet(f1, idColumn)
 	if err != nil {
 		http.Error(w, "Ошибка индексации Файла 1: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// ШАГ 2: Сбор ID из Файла 2 (со всех листов)
 	setB, err := buildIDSet(f2, idColumn)
 	if err != nil {
 		http.Error(w, "Ошибка индексации Файла 2: "+err.Error(), http.StatusBadRequest)
@@ -108,7 +130,6 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = out.NewSheet(sheetName2)
 	_ = out.DeleteSheet("Sheet1")
 
-	// ШАГ 3: Потоковая запись расхождений
 	if err := writeDiscrepancies(f1, idColumn, setB, out, sheetName1); err != nil {
 		http.Error(w, "Ошибка генерации расхождений Файла 1: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -119,23 +140,22 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filename := fmt.Sprintf("report_%d.xlsx", time.Now().Unix())
+	filename := fmt.Sprintf("compare_report_%d.xlsx", time.Now().Unix())
 	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
 	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
 	if _, err := out.WriteTo(w); err != nil {
 		log.Printf("Ошибка отправки отчета клиенту: %v", err)
 	}
 }
 
-// buildIDSet итерируется по всем листам книги и собирает уникальные ID
 func buildIDSet(f *excelize.File, idColumn string) (map[string]struct{}, error) {
 	set := make(map[string]struct{})
+	targetIDHeader := sanitizeKey(idColumn)
 
 	for _, sheet := range f.GetSheetList() {
 		rows, err := f.Rows(sheet)
 		if err != nil {
-			continue // Пропускаем проблемные или пустые листы
+			continue
 		}
 
 		idIdx := -1
@@ -149,7 +169,7 @@ func buildIDSet(f *excelize.File, idColumn string) (map[string]struct{}, error) 
 
 			if isFirstRow {
 				for i, col := range cols {
-					if strings.TrimSpace(strings.ToLower(col)) == strings.TrimSpace(strings.ToLower(idColumn)) {
+					if sanitizeKey(col) == targetIDHeader {
 						idIdx = i
 						break
 					}
@@ -159,7 +179,7 @@ func buildIDSet(f *excelize.File, idColumn string) (map[string]struct{}, error) 
 			}
 
 			if idIdx != -1 && idIdx < len(cols) {
-				val := strings.TrimSpace(cols[idIdx])
+				val := sanitizeKey(cols[idIdx])
 				if val != "" {
 					set[val] = struct{}{}
 				}
@@ -170,7 +190,6 @@ func buildIDSet(f *excelize.File, idColumn string) (map[string]struct{}, error) 
 	return set, nil
 }
 
-// writeDiscrepancies использует StreamWriter для записи без нагрузки на RAM
 func writeDiscrepancies(fIn *excelize.File, idColumn string, targetSet map[string]struct{}, fOut *excelize.File, sheetOut string) error {
 	sw, err := fOut.NewStreamWriter(sheetOut)
 	if err != nil {
@@ -179,6 +198,7 @@ func writeDiscrepancies(fIn *excelize.File, idColumn string, targetSet map[strin
 
 	outRowIdx := 1
 	headerWritten := false
+	targetIDHeader := sanitizeKey(idColumn)
 
 	for _, sheetIn := range fIn.GetSheetList() {
 		rows, err := fIn.Rows(sheetIn)
@@ -196,15 +216,13 @@ func writeDiscrepancies(fIn *excelize.File, idColumn string, targetSet map[strin
 			}
 
 			if isFirstRow {
-				// Ищем колонку ID на текущем листе
 				for i, col := range cols {
-					if strings.TrimSpace(strings.ToLower(col)) == strings.TrimSpace(strings.ToLower(idColumn)) {
+					if sanitizeKey(col) == targetIDHeader {
 						idIdx = i
 						break
 					}
 				}
 
-				// Записываем шапку только один раз для результирующего файла
 				if !headerWritten {
 					rowVals := make([]interface{}, len(cols))
 					for i, v := range cols {
@@ -221,23 +239,244 @@ func writeDiscrepancies(fIn *excelize.File, idColumn string, targetSet map[strin
 			}
 
 			if idIdx != -1 && idIdx < len(cols) {
-				val := strings.TrimSpace(cols[idIdx])
-				_, exists := targetSet[val]
-
-				if !exists {
-					rowVals := make([]interface{}, len(cols))
-					for i, v := range cols {
-						rowVals[i] = v
+				val := sanitizeKey(cols[idIdx])
+				// Если значение не пустое и отсутствует во второй таблице — записываем
+				if val != "" {
+					if _, exists := targetSet[val]; !exists {
+						rowVals := make([]interface{}, len(cols))
+						for i, v := range cols {
+							rowVals[i] = v
+						}
+						cell, _ := excelize.CoordinatesToCellName(1, outRowIdx)
+						_ = sw.SetRow(cell, rowVals)
+						outRowIdx++
 					}
-					cell, _ := excelize.CoordinatesToCellName(1, outRowIdx)
-					_ = sw.SetRow(cell, rowVals)
-					outRowIdx++
 				}
 			}
 		}
 		rows.Close()
 	}
+	return sw.Flush()
+}
 
-	// Обязательно сбрасываем буфер на диск
+// ==========================================
+// ФУНКЦИОНАЛ 2: ОБОГАЩЕНИЕ ДАННЫХ (ENRICH)
+// ==========================================
+func enrichHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, "Ошибка парсинга формы: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	matchColsRaw := r.FormValue("match_columns")
+	targetColRaw := r.FormValue("target_column")
+	if matchColsRaw == "" || targetColRaw == "" {
+		http.Error(w, "Необходимы параметры match_columns и target_column", http.StatusBadRequest)
+		return
+	}
+
+	var matchCols []string
+	for _, c := range strings.Split(matchColsRaw, ",") {
+		cleanCol := sanitizeKey(c)
+		if cleanCol != "" {
+			matchCols = append(matchCols, cleanCol)
+		}
+	}
+
+	file1, _, err := r.FormFile("file1")
+	if err != nil {
+		http.Error(w, "Файл file1 обязателен", http.StatusBadRequest)
+		return
+	}
+	defer file1.Close()
+
+	file2, _, err := r.FormFile("file2")
+	if err != nil {
+		http.Error(w, "Файл file2 обязателен", http.StatusBadRequest)
+		return
+	}
+	defer file2.Close()
+
+	f1, err := safeOpenExcel(file1.(*os.File))
+	if err != nil {
+		http.Error(w, "Ошибка чтения Файла 1: "+err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	defer f1.Close()
+
+	f2, err := safeOpenExcel(file2.(*os.File))
+	if err != nil {
+		http.Error(w, "Ошибка чтения Файла 2: "+err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	defer f2.Close()
+
+	enrichMap, err := buildEnrichMap(f2, matchCols, sanitizeKey(targetColRaw))
+	if err != nil {
+		http.Error(w, "Ошибка индексации Базы Данных: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	out := excelize.NewFile()
+	defer out.Close()
+	sheetOutName := "Обогащенные данные"
+	out.NewSheet(sheetOutName)
+	out.DeleteSheet("Sheet1")
+
+	if err := processEnrich(f1, enrichMap, matchCols, targetColRaw, out, sheetOutName); err != nil {
+		http.Error(w, "Ошибка обработки данных: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	filename := fmt.Sprintf("enriched_report_%d.xlsx", time.Now().Unix())
+	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	if _, err := out.WriteTo(w); err != nil {
+		log.Printf("Ошибка отправки отчета: %v", err)
+	}
+}
+
+func buildEnrichMap(f *excelize.File, matchCols []string, targetCol string) (map[string]string, error) {
+	enrichMap := make(map[string]string)
+
+	for _, sheet := range f.GetSheetList() {
+		rows, err := f.Rows(sheet)
+		if err != nil {
+			continue
+		}
+
+		matchIdxs := make([]int, len(matchCols))
+		for i := range matchIdxs {
+			matchIdxs[i] = -1
+		}
+		targetIdx := -1
+		isFirstRow := true
+
+		for rows.Next() {
+			cols, err := rows.Columns()
+			if err != nil {
+				break
+			}
+
+			if isFirstRow {
+				for i, colName := range cols {
+					normCol := sanitizeKey(colName)
+
+					for j, matchCol := range matchCols {
+						if normCol == matchCol {
+							matchIdxs[j] = i
+						}
+					}
+					if normCol == targetCol {
+						targetIdx = i
+					}
+				}
+				isFirstRow = false
+				continue
+			}
+
+			if targetIdx != -1 && targetIdx < len(cols) {
+				var keyParts []string
+				for _, idx := range matchIdxs {
+					if idx != -1 && idx < len(cols) {
+						keyParts = append(keyParts, sanitizeKey(cols[idx]))
+					} else {
+						keyParts = append(keyParts, "")
+					}
+				}
+				key := strings.Join(keyParts, "|||")
+				enrichMap[key] = strings.TrimSpace(cols[targetIdx])
+			}
+		}
+		rows.Close()
+	}
+	return enrichMap, nil
+}
+
+func processEnrich(fIn *excelize.File, enrichMap map[string]string, matchCols []string, targetColRaw string, fOut *excelize.File, sheetOut string) error {
+	sw, err := fOut.NewStreamWriter(sheetOut)
+	if err != nil {
+		return err
+	}
+
+	outRowIdx := 1
+	headerWritten := false
+
+	for _, sheet := range fIn.GetSheetList() {
+		rows, err := fIn.Rows(sheet)
+		if err != nil {
+			continue
+		}
+
+		matchIdxs := make([]int, len(matchCols))
+		for i := range matchIdxs {
+			matchIdxs[i] = -1
+		}
+		isFirstRow := true
+
+		for rows.Next() {
+			cols, err := rows.Columns()
+			if err != nil {
+				break
+			}
+
+			if isFirstRow {
+				for i, colName := range cols {
+					normCol := sanitizeKey(colName)
+					for j, matchCol := range matchCols {
+						if normCol == matchCol {
+							matchIdxs[j] = i
+						}
+					}
+				}
+
+				if !headerWritten {
+					rowVals := make([]interface{}, len(cols)+1)
+					for i, v := range cols {
+						rowVals[i] = v
+					}
+					rowVals[len(cols)] = "Найденный " + targetColRaw
+					cell, _ := excelize.CoordinatesToCellName(1, outRowIdx)
+					_ = sw.SetRow(cell, rowVals)
+					outRowIdx++
+					headerWritten = true
+				}
+				isFirstRow = false
+				continue
+			}
+
+			var keyParts []string
+			for _, idx := range matchIdxs {
+				if idx != -1 && idx < len(cols) {
+					keyParts = append(keyParts, sanitizeKey(cols[idx]))
+				} else {
+					keyParts = append(keyParts, "")
+				}
+			}
+			key := strings.Join(keyParts, "|||")
+
+			foundID := "Не найдено"
+			if val, ok := enrichMap[key]; ok {
+				foundID = val
+			}
+
+			rowVals := make([]interface{}, len(cols)+1)
+			for i, v := range cols {
+				rowVals[i] = v
+			}
+			rowVals[len(cols)] = foundID
+
+			cell, _ := excelize.CoordinatesToCellName(1, outRowIdx)
+			_ = sw.SetRow(cell, rowVals)
+			outRowIdx++
+		}
+		rows.Close()
+	}
+
 	return sw.Flush()
 }
