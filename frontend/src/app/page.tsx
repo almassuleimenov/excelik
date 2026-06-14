@@ -77,7 +77,7 @@ export default function ExcelAppPage() {
     }
 
     try {
-      const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+      const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'https://excelik.onrender.com';
       const endpoint = mode === 'compare' ? '/api/v1/compare' : '/api/v1/enrich';
       
       const response = await fetch(`${baseUrl}${endpoint}`, {
