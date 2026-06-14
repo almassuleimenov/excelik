@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io" // Добавлен пакет io для работы с интерфейсами потока
 	"log"
 	"net/http"
 	"os"
@@ -30,11 +31,13 @@ func main() {
 	}
 }
 
+// Усиленный corsMiddleware для работы с браузерами
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, Origin")
+		w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition") // Разрешаем фронтенду видеть имя скачиваемого файла
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -52,13 +55,12 @@ func sanitizeKey(val string) string {
 	return val
 }
 
-// safeOpenExcel безопасно открывает Excel файл с лимитом на размер распакованного XML
-func safeOpenExcel(fileData *os.File) (*excelize.File, error) {
-	// Ограничиваем размер потребляемой памяти при распаковке тяжелых файлов
+// safeOpenExcel принимает любой поток (io.Reader) и безопасно открывает Excel файл с лимитом памяти
+func safeOpenExcel(r io.Reader) (*excelize.File, error) {
 	opts := excelize.Options{
-		UnzipXMLSizeLimit: 1024 * 1024 * 500, // 500 MB лимит
+		UnzipXMLSizeLimit: 1024 * 1024 * 150, // Лимит в 150 MB для защиты от OOM в Render
 	}
-	return excelize.OpenReader(fileData, opts)
+	return excelize.OpenReader(r, opts)
 }
 
 // ==========================================
@@ -94,14 +96,15 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file2.Close()
 
-	f1, err := safeOpenExcel(file1.(*os.File))
+	// Убрано жесткое приведение типов .(*os.File)
+	f1, err := safeOpenExcel(file1)
 	if err != nil {
 		http.Error(w, "Ошибка чтения Файла 1: "+err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
 	defer f1.Close()
 
-	f2, err := safeOpenExcel(file2.(*os.File))
+	f2, err := safeOpenExcel(file2)
 	if err != nil {
 		http.Error(w, "Ошибка чтения Файла 2: "+err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -240,7 +243,6 @@ func writeDiscrepancies(fIn *excelize.File, idColumn string, targetSet map[strin
 
 			if idIdx != -1 && idIdx < len(cols) {
 				val := sanitizeKey(cols[idIdx])
-				// Если значение не пустое и отсутствует во второй таблице — записываем
 				if val != "" {
 					if _, exists := targetSet[val]; !exists {
 						rowVals := make([]interface{}, len(cols))
@@ -302,14 +304,15 @@ func enrichHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file2.Close()
 
-	f1, err := safeOpenExcel(file1.(*os.File))
+	// Убрано жесткое приведение типов .(*os.File)
+	f1, err := safeOpenExcel(file1)
 	if err != nil {
 		http.Error(w, "Ошибка чтения Файла 1: "+err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
 	defer f1.Close()
 
-	f2, err := safeOpenExcel(file2.(*os.File))
+	f2, err := safeOpenExcel(file2)
 	if err != nil {
 		http.Error(w, "Ошибка чтения Файла 2: "+err.Error(), http.StatusUnprocessableEntity)
 		return
