@@ -83,10 +83,18 @@ export default function ExcelAppPage() {
       if (!response.ok) {
         let errorMessage = 'Произошла ошибка при обработке файлов на сервере.';
         try {
-          const errorData = await response.json();
-          errorMessage = errorData.detail || errorData.error || errorMessage;
+          // Читаем ответ как обычный текст
+          const errorText = await response.text();
+          try {
+            // Пытаемся распарсить как JSON, если сервер когда-нибудь будет отдавать JSON
+            const errorData = JSON.parse(errorText);
+            errorMessage = errorData.detail || errorData.error || errorMessage;
+          } catch {
+            // Если это не JSON, значит это сырая ошибка от нашего Go-бэкенда
+            errorMessage = errorText || `Ошибка сервера: ${response.status} ${response.statusText}`;
+          }
         } catch {
-          errorMessage = `Ошибка сервера: ${response.status} ${response.statusText} (Возможно, сервер ушел в sleep-мод или таймаут)`;
+          errorMessage = `Ошибка соединения: ${response.status} ${response.statusText}`;
         }
         throw new Error(errorMessage);
       }
