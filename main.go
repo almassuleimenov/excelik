@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -42,18 +44,24 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// sanitizeKey теперь использует высокооптимизированный strings.Fields вместо тяжелых регулярных выражений
 func sanitizeKey(val string) string {
 	val = strings.ToLower(val)
 	return strings.Join(strings.Fields(val), " ")
 }
 
-// safeOpenExcel открывает файл с лимитом в 1 ГБ (хватит на ~1 млн строк), чтобы защититься от реального OOM
-func safeOpenExcel(r io.Reader) (*excelize.File, error) {
-	opts := excelize.Options{
-		UnzipXMLSizeLimit: 1024 * 1024 * 1024,
+// saveToTempFile сохраняет поток из HTTP-запроса прямо на диск. 
+// Это спасает от OOM при чтении больших файлов (разгружает RAM на I/O диска).
+func saveToTempFile(r io.Reader, prefix string) (string, error) {
+	tempFile, err := os.CreateTemp("", fmt.Sprintf("%s-*.xlsx", prefix))
+	if err != nil {
+		return "", err
 	}
-	return excelize.OpenReader(r, opts)
+	defer tempFile.Close()
+
+	if _, err := io.Copy(tempFile, r); err != nil {
+		return "", err
+	}
+	return tempFile.Name(), nil
 }
 
 // ==========================================
@@ -65,7 +73,7 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseMultipartForm(100 << 20); err != nil {
+	if err := r.ParseMultipartForm(150 << 20); err != nil {
 		http.Error(w, "Ошибка парсинга формы: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -89,14 +97,30 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file2.Close()
 
-	f1, err := safeOpenExcel(file1)
+	// Сохраняем на диск
+	tempPath1, err := saveToTempFile(file1, "file1")
+	if err != nil {
+		http.Error(w, "Ошибка сохранения Файла 1: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(tempPath1)
+
+	tempPath2, err := saveToTempFile(file2, "file2")
+	if err != nil {
+		http.Error(w, "Ошибка сохранения Файла 2: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(tempPath2)
+
+	// Открываем файлы строго с диска
+	f1, err := excelize.OpenFile(tempPath1)
 	if err != nil {
 		http.Error(w, "Ошибка чтения Файла 1: "+err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
 	defer f1.Close()
 
-	f2, err := safeOpenExcel(file2)
+	f2, err := excelize.OpenFile(tempPath2)
 	if err != nil {
 		http.Error(w, "Ошибка чтения Файла 2: "+err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -109,11 +133,16 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Агрессивный сбор мусора после построения первой мапы
+	runtime.GC()
+
 	setB, err := buildIDSet(f2, idColumn)
 	if err != nil {
 		http.Error(w, "Ошибка индексации Файла 2: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	runtime.GC()
 
 	out := excelize.NewFile()
 	defer out.Close()
@@ -135,12 +164,16 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filename := fmt.Sprintf("compare_report_%d.xlsx", time.Now().Unix())
-	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
-	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-	if _, err := out.WriteTo(w); err != nil {
-		log.Printf("Ошибка отправки отчета клиенту: %v", err)
+	tempOutPath := filepath.Join(os.TempDir(), fmt.Sprintf("compare_report_%d.xlsx", time.Now().Unix()))
+	if err := out.SaveAs(tempOutPath); err != nil {
+		log.Printf("Ошибка сохранения итогового файла: %v", err)
+		return
 	}
+	defer os.Remove(tempOutPath)
+
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=compare_report_%d.xlsx", time.Now().Unix()))
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	http.ServeFile(w, r, tempOutPath)
 }
 
 func buildIDSet(f *excelize.File, idColumn string) (map[string]struct{}, error) {
@@ -275,7 +308,7 @@ func enrichHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseMultipartForm(100 << 20); err != nil {
+	if err := r.ParseMultipartForm(150 << 20); err != nil {
 		http.Error(w, "Ошибка парсинга формы: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -309,16 +342,30 @@ func enrichHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file2.Close()
 
-	f1, err := safeOpenExcel(file1)
+	tempPath1, err := saveToTempFile(file1, "file1")
 	if err != nil {
-		http.Error(w, "Ошибка чтения Файла 1: "+err.Error(), http.StatusUnprocessableEntity)
+		http.Error(w, "Ошибка сохранения Файла 1", http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(tempPath1)
+
+	tempPath2, err := saveToTempFile(file2, "file2")
+	if err != nil {
+		http.Error(w, "Ошибка сохранения Файла 2", http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(tempPath2)
+
+	f1, err := excelize.OpenFile(tempPath1)
+	if err != nil {
+		http.Error(w, "Ошибка чтения Файла 1", http.StatusUnprocessableEntity)
 		return
 	}
 	defer f1.Close()
 
-	f2, err := safeOpenExcel(file2)
+	f2, err := excelize.OpenFile(tempPath2)
 	if err != nil {
-		http.Error(w, "Ошибка чтения Файла 2: "+err.Error(), http.StatusUnprocessableEntity)
+		http.Error(w, "Ошибка чтения Файла 2", http.StatusUnprocessableEntity)
 		return
 	}
 	defer f2.Close()
@@ -328,6 +375,8 @@ func enrichHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Ошибка построения базы: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	runtime.GC()
 
 	out := excelize.NewFile()
 	defer out.Close()
@@ -340,12 +389,16 @@ func enrichHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filename := fmt.Sprintf("enriched_report_%d.xlsx", time.Now().Unix())
-	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
-	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-	if _, err := out.WriteTo(w); err != nil {
-		log.Printf("Ошибка отправки отчета: %v", err)
+	tempOutPath := filepath.Join(os.TempDir(), fmt.Sprintf("enriched_report_%d.xlsx", time.Now().Unix()))
+	if err := out.SaveAs(tempOutPath); err != nil {
+		log.Printf("Ошибка сохранения отчета: %v", err)
+		return
 	}
+	defer os.Remove(tempOutPath)
+
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=enriched_report_%d.xlsx", time.Now().Unix()))
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	http.ServeFile(w, r, tempOutPath)
 }
 
 func buildEnrichMap(f *excelize.File, matchCols []string, targetCol string) (map[string]string, error) {
