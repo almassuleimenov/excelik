@@ -1,5 +1,4 @@
 'use client';
-// D:\Project\backend_projects\excelik\frontend\src\app\page.tsx
 import React, { useState, useEffect } from 'react';
 
 const formatFileSize = (bytes: number): string => {
@@ -13,17 +12,13 @@ const formatFileSize = (bytes: number): string => {
 export default function ExcelAppPage() {
   const [mode, setMode] = useState<'compare' | 'enrich'>('compare');
 
-  // Общие стейты
   const [file1, setFile1] = useState<File | null>(null);
   const [file2, setFile2] = useState<File | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [elapsedTime, setElapsedTime] = useState<number>(0);
 
-  // Стейты для Сверки
   const [idColumn, setIdColumn] = useState<string>('ID');
-
-  // Стейты для Обогащения (ВПР)
   const [matchColumns, setMatchColumns] = useState<string>('ФИО, ИИН, Период услуги, Услуга, Сумма');
   const [targetColumn, setTargetColumn] = useState<string>('ID услуги');
 
@@ -91,7 +86,7 @@ export default function ExcelAppPage() {
           const errorData = await response.json();
           errorMessage = errorData.detail || errorData.error || errorMessage;
         } catch {
-          errorMessage = `Ошибка сервера: ${response.status} ${response.statusText}`;
+          errorMessage = `Ошибка сервера: ${response.status} ${response.statusText} (Возможно, сервер ушел в sleep-мод или таймаут)`;
         }
         throw new Error(errorMessage);
       }
@@ -113,7 +108,7 @@ export default function ExcelAppPage() {
 
     } catch (err: unknown) {
       if (err instanceof TypeError && err.message === 'Failed to fetch') {
-        setError('Не удалось связаться с сервером. Проверьте CORS или запуск бэкенда.');
+        setError('Не удалось связаться с сервером. Дождитесь выхода Render из спящего режима (до 50 секунд) и повторите.');
       } else if (err instanceof Error) {
         setError(err.message);
       } else {

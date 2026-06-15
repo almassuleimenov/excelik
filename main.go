@@ -2,19 +2,15 @@ package main
 
 import (
 	"fmt"
-	"io" // Добавлен пакет io для работы с интерфейсами потока
+	"io"
 	"log"
 	"net/http"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/xuri/excelize/v2"
 )
-
-// Регулярное выражение для удаления лишних пробелов внутри текста (например, двойных пробелов в ФИО)
-var multipleSpacesRegex = regexp.MustCompile(`\s+`)
 
 func main() {
 	port := os.Getenv("PORT")
@@ -31,13 +27,12 @@ func main() {
 	}
 }
 
-// Усиленный corsMiddleware для работы с браузерами
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
 		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, Origin")
-		w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition") // Разрешаем фронтенду видеть имя скачиваемого файла
+		w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -47,18 +42,16 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// sanitizeKey очищает строку от лишних пробелов по краям и внутри, а также приводит к нижнему регистру
+// sanitizeKey теперь использует высокооптимизированный strings.Fields вместо тяжелых регулярных выражений
 func sanitizeKey(val string) string {
-	val = strings.TrimSpace(val)
 	val = strings.ToLower(val)
-	val = multipleSpacesRegex.ReplaceAllString(val, " ")
-	return val
+	return strings.Join(strings.Fields(val), " ")
 }
 
-// safeOpenExcel принимает любой поток (io.Reader) и безопасно открывает Excel файл с лимитом памяти
+// safeOpenExcel открывает файл с лимитом в 1 ГБ (хватит на ~1 млн строк), чтобы защититься от реального OOM
 func safeOpenExcel(r io.Reader) (*excelize.File, error) {
 	opts := excelize.Options{
-		UnzipXMLSizeLimit: 1024 * 1024 * 150, // Лимит в 150 MB для защиты от OOM в Render
+		UnzipXMLSizeLimit: 1024 * 1024 * 1024,
 	}
 	return excelize.OpenReader(r, opts)
 }
@@ -72,7 +65,7 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
+	if err := r.ParseMultipartForm(100 << 20); err != nil {
 		http.Error(w, "Ошибка парсинга формы: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -96,7 +89,6 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file2.Close()
 
-	// Убрано жесткое приведение типов .(*os.File)
 	f1, err := safeOpenExcel(file1)
 	if err != nil {
 		http.Error(w, "Ошибка чтения Файла 1: "+err.Error(), http.StatusUnprocessableEntity)
@@ -154,6 +146,7 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 func buildIDSet(f *excelize.File, idColumn string) (map[string]struct{}, error) {
 	set := make(map[string]struct{})
 	targetIDHeader := sanitizeKey(idColumn)
+	foundValidSheet := false
 
 	for _, sheet := range f.GetSheetList() {
 		rows, err := f.Rows(sheet)
@@ -177,6 +170,10 @@ func buildIDSet(f *excelize.File, idColumn string) (map[string]struct{}, error) 
 						break
 					}
 				}
+				if idIdx == -1 {
+					break
+				}
+				foundValidSheet = true
 				isFirstRow = false
 				continue
 			}
@@ -189,6 +186,10 @@ func buildIDSet(f *excelize.File, idColumn string) (map[string]struct{}, error) 
 			}
 		}
 		rows.Close()
+	}
+
+	if !foundValidSheet {
+		return nil, fmt.Errorf("колонка '%s' не найдена ни на одном листе", idColumn)
 	}
 	return set, nil
 }
@@ -224,6 +225,10 @@ func writeDiscrepancies(fIn *excelize.File, idColumn string, targetSet map[strin
 						idIdx = i
 						break
 					}
+				}
+
+				if idIdx == -1 {
+					break
 				}
 
 				if !headerWritten {
@@ -270,7 +275,7 @@ func enrichHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
+	if err := r.ParseMultipartForm(100 << 20); err != nil {
 		http.Error(w, "Ошибка парсинга формы: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -304,7 +309,6 @@ func enrichHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file2.Close()
 
-	// Убрано жесткое приведение типов .(*os.File)
 	f1, err := safeOpenExcel(file1)
 	if err != nil {
 		http.Error(w, "Ошибка чтения Файла 1: "+err.Error(), http.StatusUnprocessableEntity)
@@ -321,7 +325,7 @@ func enrichHandler(w http.ResponseWriter, r *http.Request) {
 
 	enrichMap, err := buildEnrichMap(f2, matchCols, sanitizeKey(targetColRaw))
 	if err != nil {
-		http.Error(w, "Ошибка индексации Базы Данных: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "Ошибка построения базы: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -346,6 +350,7 @@ func enrichHandler(w http.ResponseWriter, r *http.Request) {
 
 func buildEnrichMap(f *excelize.File, matchCols []string, targetCol string) (map[string]string, error) {
 	enrichMap := make(map[string]string)
+	foundValidSheet := false
 
 	for _, sheet := range f.GetSheetList() {
 		rows, err := f.Rows(sheet)
@@ -354,9 +359,6 @@ func buildEnrichMap(f *excelize.File, matchCols []string, targetCol string) (map
 		}
 
 		matchIdxs := make([]int, len(matchCols))
-		for i := range matchIdxs {
-			matchIdxs[i] = -1
-		}
 		targetIdx := -1
 		isFirstRow := true
 
@@ -367,9 +369,11 @@ func buildEnrichMap(f *excelize.File, matchCols []string, targetCol string) (map
 			}
 
 			if isFirstRow {
+				for i := range matchIdxs {
+					matchIdxs[i] = -1
+				}
 				for i, colName := range cols {
 					normCol := sanitizeKey(colName)
-
 					for j, matchCol := range matchCols {
 						if normCol == matchCol {
 							matchIdxs[j] = i
@@ -379,6 +383,20 @@ func buildEnrichMap(f *excelize.File, matchCols []string, targetCol string) (map
 						targetIdx = i
 					}
 				}
+
+				isValid := targetIdx != -1
+				for _, idx := range matchIdxs {
+					if idx == -1 {
+						isValid = false
+						break
+					}
+				}
+
+				if !isValid {
+					break
+				}
+
+				foundValidSheet = true
 				isFirstRow = false
 				continue
 			}
@@ -393,10 +411,16 @@ func buildEnrichMap(f *excelize.File, matchCols []string, targetCol string) (map
 					}
 				}
 				key := strings.Join(keyParts, "|||")
-				enrichMap[key] = strings.TrimSpace(cols[targetIdx])
+				if val := strings.TrimSpace(cols[targetIdx]); val != "" {
+					enrichMap[key] = val
+				}
 			}
 		}
 		rows.Close()
+	}
+
+	if !foundValidSheet {
+		return nil, fmt.Errorf("требуемые колонки для сверки не найдены в файле базы данных")
 	}
 	return enrichMap, nil
 }
@@ -409,6 +433,7 @@ func processEnrich(fIn *excelize.File, enrichMap map[string]string, matchCols []
 
 	outRowIdx := 1
 	headerWritten := false
+	headerLen := 0
 
 	for _, sheet := range fIn.GetSheetList() {
 		rows, err := fIn.Rows(sheet)
@@ -417,9 +442,6 @@ func processEnrich(fIn *excelize.File, enrichMap map[string]string, matchCols []
 		}
 
 		matchIdxs := make([]int, len(matchCols))
-		for i := range matchIdxs {
-			matchIdxs[i] = -1
-		}
 		isFirstRow := true
 
 		for rows.Next() {
@@ -429,6 +451,9 @@ func processEnrich(fIn *excelize.File, enrichMap map[string]string, matchCols []
 			}
 
 			if isFirstRow {
+				for i := range matchIdxs {
+					matchIdxs[i] = -1
+				}
 				for i, colName := range cols {
 					normCol := sanitizeKey(colName)
 					for j, matchCol := range matchCols {
@@ -438,12 +463,25 @@ func processEnrich(fIn *excelize.File, enrichMap map[string]string, matchCols []
 					}
 				}
 
+				isValid := true
+				for _, idx := range matchIdxs {
+					if idx == -1 {
+						isValid = false
+						break
+					}
+				}
+
+				if !isValid {
+					break
+				}
+
 				if !headerWritten {
-					rowVals := make([]interface{}, len(cols)+1)
+					headerLen = len(cols)
+					rowVals := make([]interface{}, headerLen+1)
 					for i, v := range cols {
 						rowVals[i] = v
 					}
-					rowVals[len(cols)] = "Найденный " + targetColRaw
+					rowVals[headerLen] = "Найденный " + targetColRaw
 					cell, _ := excelize.CoordinatesToCellName(1, outRowIdx)
 					_ = sw.SetRow(cell, rowVals)
 					outRowIdx++
@@ -468,17 +506,25 @@ func processEnrich(fIn *excelize.File, enrichMap map[string]string, matchCols []
 				foundID = val
 			}
 
-			rowVals := make([]interface{}, len(cols)+1)
-			for i, v := range cols {
-				rowVals[i] = v
+			rowVals := make([]interface{}, headerLen+1)
+			for i := 0; i < headerLen; i++ {
+				if i < len(cols) {
+					rowVals[i] = cols[i]
+				} else {
+					rowVals[i] = ""
+				}
 			}
-			rowVals[len(cols)] = foundID
+			rowVals[headerLen] = foundID
 
 			cell, _ := excelize.CoordinatesToCellName(1, outRowIdx)
 			_ = sw.SetRow(cell, rowVals)
 			outRowIdx++
 		}
 		rows.Close()
+	}
+
+	if !headerWritten {
+		return fmt.Errorf("в целевом файле не найдены колонки для сопоставления")
 	}
 
 	return sw.Flush()
