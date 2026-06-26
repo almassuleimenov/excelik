@@ -44,19 +44,15 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// sanitizeKey используется ТОЛЬКО для поиска заголовков.
-// Оставляет одинарные пробелы, чтобы найти "ID услуги"
 func sanitizeKey(val string) string {
 	val = strings.ToLower(val)
 	return strings.Join(strings.Fields(val), " ")
 }
 
-// normalizeData используется для формирования ключа сопоставления.
-// Уничтожает ВСЕ пробелы (включая неразрывные), чтобы "3 225" совпало с "3225", а "Иванов И. И." с "Иванов И.И."
 func normalizeData(val string) string {
 	val = strings.ToLower(val)
 	val = strings.ReplaceAll(val, " ", "")
-	val = strings.ReplaceAll(val, "\u00A0", "") // Удаляем неразрывный пробел (частая проблема Excel)
+	val = strings.ReplaceAll(val, "\u00A0", "")
 	val = strings.ReplaceAll(val, "\t", "")
 	return val
 }
@@ -189,7 +185,7 @@ func buildIDSet(f *excelize.File, idColumn string) (map[string]struct{}, error) 
 	foundValidSheet := false
 
 	for _, sheet := range f.GetSheetList() {
-		rows, err := f.Rows(sheet)
+		rows, err := f.GetRows(sheet)
 		if err != nil {
 			continue
 		}
@@ -197,13 +193,7 @@ func buildIDSet(f *excelize.File, idColumn string) (map[string]struct{}, error) 
 		idIdx := -1
 		headerFound := false
 
-		for rows.Next() {
-			cols, err := rows.Columns()
-			if err != nil {
-				break
-			}
-
-			// Ищем заголовки, пока не найдем
+		for _, cols := range rows {
 			if !headerFound {
 				for i, col := range cols {
 					if sanitizeKey(col) == targetIDHeader {
@@ -213,7 +203,7 @@ func buildIDSet(f *excelize.File, idColumn string) (map[string]struct{}, error) 
 						break
 					}
 				}
-				continue // Пропускаем строку с заголовками
+				continue
 			}
 
 			if idIdx != -1 && idIdx < len(cols) {
@@ -223,7 +213,6 @@ func buildIDSet(f *excelize.File, idColumn string) (map[string]struct{}, error) 
 				}
 			}
 		}
-		rows.Close()
 	}
 
 	if !foundValidSheet {
@@ -243,20 +232,23 @@ func writeDiscrepancies(fIn *excelize.File, idColumn string, targetSet map[strin
 	targetIDHeader := sanitizeKey(idColumn)
 
 	for _, sheetIn := range fIn.GetSheetList() {
-		rows, err := fIn.Rows(sheetIn)
+		rows, err := fIn.GetRows(sheetIn)
 		if err != nil {
 			continue
+		}
+
+		// Вычисляем максимальную длину строки для выравнивания
+		maxCols := 0
+		for _, row := range rows {
+			if len(row) > maxCols {
+				maxCols = len(row)
+			}
 		}
 
 		idIdx := -1
 		headerFound := false
 
-		for rows.Next() {
-			cols, err := rows.Columns()
-			if err != nil {
-				break
-			}
-
+		for _, cols := range rows {
 			if !headerFound {
 				for i, col := range cols {
 					if sanitizeKey(col) == targetIDHeader {
@@ -267,15 +259,18 @@ func writeDiscrepancies(fIn *excelize.File, idColumn string, targetSet map[strin
 				}
 
 				if headerFound && !headerWritten {
-					rowVals := make([]interface{}, len(cols))
-					for i, v := range cols {
-						rowVals[i] = v
+					rowVals := make([]interface{}, maxCols)
+					for i := 0; i < maxCols; i++ {
+						if i < len(cols) {
+							rowVals[i] = cols[i]
+						} else {
+							rowVals[i] = ""
+						}
 					}
 					cell, _ := excelize.CoordinatesToCellName(1, outRowIdx)
-					if err := sw.SetRow(cell, rowVals); err == nil {
-						outRowIdx++
-						headerWritten = true
-					}
+					_ = sw.SetRow(cell, rowVals)
+					outRowIdx++
+					headerWritten = true
 				}
 				continue
 			}
@@ -284,9 +279,13 @@ func writeDiscrepancies(fIn *excelize.File, idColumn string, targetSet map[strin
 				val := sanitizeKey(cols[idIdx])
 				if val != "" {
 					if _, exists := targetSet[val]; !exists {
-						rowVals := make([]interface{}, len(cols))
-						for i, v := range cols {
-							rowVals[i] = v
+						rowVals := make([]interface{}, maxCols)
+						for i := 0; i < maxCols; i++ {
+							if i < len(cols) {
+								rowVals[i] = cols[i]
+							} else {
+								rowVals[i] = ""
+							}
 						}
 						cell, _ := excelize.CoordinatesToCellName(1, outRowIdx)
 						_ = sw.SetRow(cell, rowVals)
@@ -295,7 +294,6 @@ func writeDiscrepancies(fIn *excelize.File, idColumn string, targetSet map[strin
 				}
 			}
 		}
-		rows.Close()
 	}
 	return sw.Flush()
 }
@@ -407,7 +405,7 @@ func buildEnrichMap(f *excelize.File, matchCols []string, targetCol string) (map
 	foundValidSheet := false
 
 	for _, sheet := range f.GetSheetList() {
-		rows, err := f.Rows(sheet)
+		rows, err := f.GetRows(sheet)
 		if err != nil {
 			continue
 		}
@@ -419,12 +417,7 @@ func buildEnrichMap(f *excelize.File, matchCols []string, targetCol string) (map
 		targetIdx := -1
 		headerFound := false
 
-		for rows.Next() {
-			cols, err := rows.Columns()
-			if err != nil {
-				break
-			}
-
+		for _, cols := range rows {
 			if !headerFound {
 				for i, colName := range cols {
 					normCol := sanitizeKey(colName)
@@ -450,10 +443,9 @@ func buildEnrichMap(f *excelize.File, matchCols []string, targetCol string) (map
 					headerFound = true
 					foundValidSheet = true
 				}
-				continue // Продолжаем искать или переходим к данным, если заголовки найдены
+				continue
 			}
 
-			// Обработка данных строки
 			if targetIdx != -1 && targetIdx < len(cols) {
 				var keyParts []string
 				emptyKey := true
@@ -470,7 +462,6 @@ func buildEnrichMap(f *excelize.File, matchCols []string, targetCol string) (map
 					}
 				}
 
-				// Игнорируем полностью пустые строки
 				if emptyKey {
 					continue
 				}
@@ -481,7 +472,6 @@ func buildEnrichMap(f *excelize.File, matchCols []string, targetCol string) (map
 				}
 			}
 		}
-		rows.Close()
 	}
 
 	if !foundValidSheet {
@@ -501,10 +491,19 @@ func processEnrich(fIn *excelize.File, enrichMap map[string]string, matchCols []
 	headerLen := 0
 
 	for _, sheet := range fIn.GetSheetList() {
-		rows, err := fIn.Rows(sheet)
+		rows, err := fIn.GetRows(sheet)
 		if err != nil {
 			continue
 		}
+
+		// Вычисляем абсолютную максимальную длину, чтобы избежать "зигзагов" в итоговой таблице
+		maxCols := 0
+		for _, row := range rows {
+			if len(row) > maxCols {
+				maxCols = len(row)
+			}
+		}
+		headerLen = maxCols
 
 		matchIdxs := make([]int, len(matchCols))
 		for i := range matchIdxs {
@@ -512,12 +511,7 @@ func processEnrich(fIn *excelize.File, enrichMap map[string]string, matchCols []
 		}
 		headerFound := false
 
-		for rows.Next() {
-			cols, err := rows.Columns()
-			if err != nil {
-				break
-			}
-
+		for _, cols := range rows {
 			if !headerFound {
 				for i, colName := range cols {
 					normCol := sanitizeKey(colName)
@@ -539,10 +533,13 @@ func processEnrich(fIn *excelize.File, enrichMap map[string]string, matchCols []
 				if isValid {
 					headerFound = true
 					if !headerWritten {
-						headerLen = len(cols)
 						rowVals := make([]interface{}, headerLen+1)
-						for i, v := range cols {
-							rowVals[i] = v
+						for i := 0; i < headerLen; i++ {
+							if i < len(cols) {
+								rowVals[i] = cols[i]
+							} else {
+								rowVals[i] = ""
+							}
 						}
 						rowVals[headerLen] = "Найденный " + targetColRaw
 						cell, _ := excelize.CoordinatesToCellName(1, outRowIdx)
@@ -569,7 +566,6 @@ func processEnrich(fIn *excelize.File, enrichMap map[string]string, matchCols []
 				foundID = val
 			}
 
-			// Гарантируем, что длина строки не сломается, если Excel обрезал пустые ячейки в конце
 			rowVals := make([]interface{}, headerLen+1)
 			for i := 0; i < headerLen; i++ {
 				if i < len(cols) {
@@ -584,7 +580,6 @@ func processEnrich(fIn *excelize.File, enrichMap map[string]string, matchCols []
 			_ = sw.SetRow(cell, rowVals)
 			outRowIdx++
 		}
-		rows.Close()
 	}
 
 	if !headerWritten {
