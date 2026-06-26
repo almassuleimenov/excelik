@@ -136,7 +136,6 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Ошибка индексации Файла 1: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
 	runtime.GC()
 
 	setB, err := buildIDSet(f2, idColumn)
@@ -144,7 +143,6 @@ func compareHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Ошибка индексации Файла 2: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
 	runtime.GC()
 
 	out := excelize.NewFile()
@@ -237,7 +235,6 @@ func writeDiscrepancies(fIn *excelize.File, idColumn string, targetSet map[strin
 			continue
 		}
 
-		// Вычисляем максимальную длину строки для выравнивания
 		maxCols := 0
 		for _, row := range rows {
 			if len(row) > maxCols {
@@ -299,7 +296,7 @@ func writeDiscrepancies(fIn *excelize.File, idColumn string, targetSet map[strin
 }
 
 // ==========================================
-// ФУНКЦИОНАЛ 2: ОБОГАЩЕНИЕ ДАННЫХ (ENRICH)
+// ФУНКЦИОНАЛ 2: ОБОГАЩЕНИЕ ДАННЫХ (ENRICH) - IN-PLACE
 // ==========================================
 func enrichHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -355,6 +352,7 @@ func enrichHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.Remove(tempPath2)
 
+	// Открываем файлы. f1 мы будем модифицировать напрямую!
 	f1, err := excelize.OpenFile(tempPath1)
 	if err != nil {
 		http.Error(w, "Ошибка чтения Файла 1", http.StatusUnprocessableEntity)
@@ -369,6 +367,7 @@ func enrichHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f2.Close()
 
+	// Строим мапу из Базы (f2)
 	enrichMap, err := buildEnrichMap(f2, matchCols, sanitizeKey(targetColRaw))
 	if err != nil {
 		http.Error(w, "Ошибка построения базы: "+err.Error(), http.StatusBadRequest)
@@ -377,19 +376,15 @@ func enrichHandler(w http.ResponseWriter, r *http.Request) {
 
 	runtime.GC()
 
-	out := excelize.NewFile()
-	defer out.Close()
-	sheetOutName := "Обогащенные данные"
-	out.NewSheet(sheetOutName)
-	out.DeleteSheet("Sheet1")
-
-	if err := processEnrich(f1, enrichMap, matchCols, targetColRaw, out, sheetOutName); err != nil {
+	// Выполняем точечное внедрение данных в f1 (In-Place)
+	if err := processEnrichInPlace(f1, enrichMap, matchCols, targetColRaw); err != nil {
 		http.Error(w, "Ошибка обработки данных: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	// Сохраняем модифицированный f1 во временный файл
 	tempOutPath := filepath.Join(os.TempDir(), fmt.Sprintf("enriched_report_%d.xlsx", time.Now().Unix()))
-	if err := out.SaveAs(tempOutPath); err != nil {
+	if err := f1.SaveAs(tempOutPath); err != nil {
 		log.Printf("Ошибка сохранения отчета: %v", err)
 		return
 	}
@@ -480,111 +475,100 @@ func buildEnrichMap(f *excelize.File, matchCols []string, targetCol string) (map
 	return enrichMap, nil
 }
 
-func processEnrich(fIn *excelize.File, enrichMap map[string]string, matchCols []string, targetColRaw string, fOut *excelize.File, sheetOut string) error {
-	sw, err := fOut.NewStreamWriter(sheetOut)
-	if err != nil {
-		return err
-	}
+// Новая функция: модифицирует оригинальный файл f1, сохраняя все стили и структуры
+func processEnrichInPlace(f1 *excelize.File, enrichMap map[string]string, matchCols []string, targetColRaw string) error {
+	foundAnyValidSheet := false
 
-	outRowIdx := 1
-	headerWritten := false
-	headerLen := 0
-
-	for _, sheet := range fIn.GetSheetList() {
-		rows, err := fIn.GetRows(sheet)
+	for _, sheet := range f1.GetSheetList() {
+		rows, err := f1.GetRows(sheet)
 		if err != nil {
 			continue
 		}
-
-		// Вычисляем абсолютную максимальную длину, чтобы избежать "зигзагов" в итоговой таблице
-		maxCols := 0
-		for _, row := range rows {
-			if len(row) > maxCols {
-				maxCols = len(row)
-			}
-		}
-		headerLen = maxCols
 
 		matchIdxs := make([]int, len(matchCols))
 		for i := range matchIdxs {
 			matchIdxs[i] = -1
 		}
-		headerFound := false
+		headerRowIdx := -1
 
-		for _, cols := range rows {
-			if !headerFound {
-				for i, colName := range cols {
-					normCol := sanitizeKey(colName)
-					for j, matchCol := range matchCols {
-						if normCol == matchCol {
-							matchIdxs[j] = i
-						}
+		// Ищем строку с заголовками
+		for rowIdx, cols := range rows {
+			for i, colName := range cols {
+				normCol := sanitizeKey(colName)
+				for j, matchCol := range matchCols {
+					if normCol == matchCol {
+						matchIdxs[j] = i
 					}
 				}
-
-				isValid := true
-				for _, idx := range matchIdxs {
-					if idx == -1 {
-						isValid = false
-						break
-					}
-				}
-
-				if isValid {
-					headerFound = true
-					if !headerWritten {
-						rowVals := make([]interface{}, headerLen+1)
-						for i := 0; i < headerLen; i++ {
-							if i < len(cols) {
-								rowVals[i] = cols[i]
-							} else {
-								rowVals[i] = ""
-							}
-						}
-						rowVals[headerLen] = "Найденный " + targetColRaw
-						cell, _ := excelize.CoordinatesToCellName(1, outRowIdx)
-						_ = sw.SetRow(cell, rowVals)
-						outRowIdx++
-						headerWritten = true
-					}
-				}
-				continue
 			}
 
+			isValid := true
+			for _, idx := range matchIdxs {
+				if idx == -1 {
+					isValid = false
+					break
+				}
+			}
+
+			if isValid {
+				headerRowIdx = rowIdx
+				foundAnyValidSheet = true
+				break
+			}
+		}
+
+		if headerRowIdx == -1 {
+			continue
+		}
+
+		// Вычисляем абсолютную максимальную ширину на текущем листе,
+		// чтобы не затереть существующие данные
+		absMaxCol := 0
+		for _, r := range rows {
+			if len(r) > absMaxCol {
+				absMaxCol = len(r)
+			}
+		}
+
+		targetColIdx := absMaxCol + 1 // excelize использует 1-based индекс для имен (A=1, B=2)
+		targetColName, _ := excelize.ColumnNumberToName(targetColIdx)
+
+		// Аккуратно вписываем заголовок
+		_ = f1.SetCellValue(sheet, fmt.Sprintf("%s%d", targetColName, headerRowIdx+1), "Найденный "+targetColRaw)
+
+		// Проходим по данным и вписываем значения
+		for rowIdx := headerRowIdx + 1; rowIdx < len(rows); rowIdx++ {
+			cols := rows[rowIdx]
 			var keyParts []string
+			emptyKey := true
+			
 			for _, idx := range matchIdxs {
 				if idx != -1 && idx < len(cols) {
-					keyParts = append(keyParts, normalizeData(cols[idx]))
+					val := normalizeData(cols[idx])
+					keyParts = append(keyParts, val)
+					if val != "" {
+						emptyKey = false
+					}
 				} else {
 					keyParts = append(keyParts, "")
 				}
 			}
+
+			if emptyKey {
+				continue // Пропускаем пустые строки
+			}
+
 			key := strings.Join(keyParts, "|||")
-
-			foundID := "Не найдено"
 			if val, ok := enrichMap[key]; ok {
-				foundID = val
+				_ = f1.SetCellValue(sheet, fmt.Sprintf("%s%d", targetColName, rowIdx+1), val)
+			} else {
+				_ = f1.SetCellValue(sheet, fmt.Sprintf("%s%d", targetColName, rowIdx+1), "Не найдено")
 			}
-
-			rowVals := make([]interface{}, headerLen+1)
-			for i := 0; i < headerLen; i++ {
-				if i < len(cols) {
-					rowVals[i] = cols[i]
-				} else {
-					rowVals[i] = ""
-				}
-			}
-			rowVals[headerLen] = foundID
-
-			cell, _ := excelize.CoordinatesToCellName(1, outRowIdx)
-			_ = sw.SetRow(cell, rowVals)
-			outRowIdx++
 		}
 	}
 
-	if !headerWritten {
+	if !foundAnyValidSheet {
 		return fmt.Errorf("в целевом файле не найдены колонки для сопоставления")
 	}
-
-	return sw.Flush()
+	return nil
 }
