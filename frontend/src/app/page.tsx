@@ -9,6 +9,9 @@ const formatFileSize = (bytes: number): string => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
+// Лимит на 1 файл: 24 МБ (чтобы 2 файла суммарно не превышали 50 МБ лимита бэкенда)
+const MAX_FILE_SIZE = 24 * 1024 * 1024; 
+
 export default function ExcelAppPage() {
   const [mode, setMode] = useState<'compare' | 'enrich'>('compare');
 
@@ -38,7 +41,17 @@ export default function ExcelAppPage() {
     e: React.ChangeEvent<HTMLInputElement>,
     setFile: React.Dispatch<React.SetStateAction<File | null>>
   ) => {
-    setFile(e.target.files?.[0] || null);
+    const selectedFile = e.target.files?.[0];
+    
+    // Fail Fast: Клиентская валидация размера файла
+    if (selectedFile && selectedFile.size > MAX_FILE_SIZE) {
+      setError(`Файл "${selectedFile.name}" слишком большой (${formatFileSize(selectedFile.size)}). Максимальный размер одного файла: 24 MB.`);
+      setFile(null);
+      e.target.value = ''; // Сбрасываем input
+      return;
+    }
+
+    setFile(selectedFile || null);
     setError(null);
   };
 
@@ -47,6 +60,12 @@ export default function ExcelAppPage() {
 
     if (!file1 || !file2) {
       setError('Пожалуйста, загрузите оба файла.');
+      return;
+    }
+
+    // Двойной контроль перед отправкой
+    if (file1.size + file2.size > 48 * 1024 * 1024) {
+      setError('Суммарный размер файлов превышает лимит сервера. Пожалуйста, уменьшите файлы.');
       return;
     }
 
@@ -81,16 +100,18 @@ export default function ExcelAppPage() {
       });
 
       if (!response.ok) {
+        // Специфичная обработка отлупа по размеру от Nginx/Render
+        if (response.status === 413) {
+          throw new Error('Файлы слишком большие для обработки сервером (Превышен лимит Payload).');
+        }
+
         let errorMessage = 'Произошла ошибка при обработке файлов на сервере.';
         try {
-          // Читаем ответ как обычный текст
           const errorText = await response.text();
           try {
-            // Пытаемся распарсить как JSON, если сервер когда-нибудь будет отдавать JSON
             const errorData = JSON.parse(errorText);
             errorMessage = errorData.detail || errorData.error || errorMessage;
           } catch {
-            // Если это не JSON, значит это сырая ошибка от нашего Go-бэкенда
             errorMessage = errorText || `Ошибка сервера: ${response.status} ${response.statusText}`;
           }
         } catch {
